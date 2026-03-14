@@ -2,7 +2,9 @@ from fastapi import FastAPI, UploadFile, File
 from dotenv import load_dotenv
 import os
 import requests
+import json
 
+# load environment variables
 load_dotenv()
 
 FEATHERLESS_API_KEY = os.getenv("FEATHERLESS_API_KEY")
@@ -10,6 +12,9 @@ FEATHERLESS_API_KEY = os.getenv("FEATHERLESS_API_KEY")
 app = FastAPI()
 
 
+# -------------------------
+# Fake label generator
+# -------------------------
 def get_labels_fake(filename):
     name = filename.lower()
 
@@ -25,6 +30,9 @@ def get_labels_fake(filename):
     return ["Garbage"]
 
 
+# -------------------------
+# Convert labels → category
+# -------------------------
 def map_labels_to_category(labels):
     labels_lower = [label.lower() for label in labels]
 
@@ -40,56 +48,50 @@ def map_labels_to_category(labels):
     return "general environmental hazard"
 
 
-def detect_issue_fake(filename):
+# -------------------------
+# Detection pipeline
+# -------------------------
+def detect_issue(filename):
     labels = get_labels_fake(filename)
     return map_labels_to_category(labels)
 
 
-def analyze_issue_fake(pollution_type):
+# -------------------------
+# Fallback analysis
+# -------------------------
+def analyze_issue_fallback(pollution_type):
+
     if pollution_type == "smoke / fire":
-        severity = "high"
-    elif pollution_type == "plastic waste near water":
-        severity = "high"
-    elif pollution_type == "trash dumping":
-        severity = "medium"
-    else:
-        severity = "medium"
+        return {
+            "severity": "high",
+            "summary": "Smoke and fire can damage ecosystems, harm wildlife, and reduce air quality.",
+            "action": "Alert emergency responders and contain the affected area."
+        }
+
+    if pollution_type == "plastic waste near water":
+        return {
+            "severity": "high",
+            "summary": "Plastic waste near water can harm aquatic life and contaminate ecosystems.",
+            "action": "Organize immediate cleanup and monitor the area for repeated dumping."
+        }
+
+    if pollution_type == "trash dumping":
+        return {
+            "severity": "medium",
+            "summary": "Trash dumping pollutes land and can damage nearby habitats.",
+            "action": "Schedule cleanup and report illegal dumping if it continues."
+        }
 
     return {
-        "severity": severity,
-        "summary": f"{pollution_type.capitalize()} was detected and may harm the environment.",
-        "action": "Organize cleanup and report repeated dumping."
+        "severity": "medium",
+        "summary": "An environmental hazard was detected and may negatively affect the surrounding area.",
+        "action": "Inspect the location and take appropriate action."
     }
 
 
-def generate_voice_fake():
-    return ""
-
-
-@app.get("/health")
-def health():
-    return {"message": "backend is working"}
-
-
-@app.post("/analyze")
-async def analyze_image(file: UploadFile = File(...)):
-    file_path = f"uploads/{file.filename}"
-
-    with open(file_path, "wb") as f:
-        content = await file.read()
-        f.write(content)
-
-    pollution_type = detect_issue_fake(file.filename)
-    analysis = analyze_issue_with_featherless(pollution_type)
-    audio_url = generate_voice_fake()
-
-    return {
-        "pollution_type": pollution_type,
-        "severity": analysis["severity"],
-        "summary": analysis["summary"],
-        "action": analysis["action"],
-        "audio_url": audio_url
-    }
+# -------------------------
+# Featherless AI analysis
+# -------------------------
 def analyze_issue_with_featherless(pollution_type):
 
     if not FEATHERLESS_API_KEY:
@@ -100,7 +102,13 @@ You are an environmental risk analysis assistant.
 
 Detected issue: {pollution_type}
 
-Explain the environmental impact in 2 short sentences and suggest one action.
+Return ONLY valid JSON in this format:
+
+{{
+ "severity": "low or medium or high",
+ "summary": "2 short sentences explaining environmental harm",
+ "action": "1 short practical action"
+}}
 """
 
     url = "https://api.featherless.ai/v1/chat/completions"
@@ -113,10 +121,16 @@ Explain the environmental impact in 2 short sentences and suggest one action.
     payload = {
         "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
         "messages": [
-            {"role": "system", "content": "You explain environmental risks clearly."},
-            {"role": "user", "content": prompt}
+            {
+                "role": "system",
+                "content": "You explain environmental risks clearly and return strict JSON only."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
         ],
-        "temperature": 0.3
+        "temperature": 0.2
     }
 
     try:
@@ -125,14 +139,49 @@ Explain the environmental impact in 2 short sentences and suggest one action.
 
         data = response.json()
 
-        content = data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"]["content"].strip()
+
+        parsed = json.loads(content)
 
         return {
-            "severity": "medium",
-            "summary": content,
-            "action": "Review and respond appropriately."
+            "severity": parsed["severity"],
+            "summary": parsed["summary"],
+            "action": parsed["action"]
         }
 
     except Exception as e:
         print("Featherless error:", e)
         return analyze_issue_fallback(pollution_type)
+
+
+# -------------------------
+# Health route
+# -------------------------
+@app.get("/health")
+def health():
+    return {"message": "backend is working"}
+
+
+# -------------------------
+# Main analyze route
+# -------------------------
+@app.post("/analyze")
+async def analyze_image(file: UploadFile = File(...)):
+
+    file_path = f"uploads/{file.filename}"
+
+    with open(file_path, "wb") as f:
+        content = await file.read()
+        f.write(content)
+
+    pollution_type = detect_issue(file.filename)
+
+    analysis = analyze_issue_with_featherless(pollution_type)
+
+    return {
+        "pollution_type": pollution_type,
+        "severity": analysis["severity"],
+        "summary": analysis["summary"],
+        "action": analysis["action"],
+        "audio_url": ""
+    }
