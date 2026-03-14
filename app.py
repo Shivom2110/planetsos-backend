@@ -1,4 +1,11 @@
 from fastapi import FastAPI, UploadFile, File
+from dotenv import load_dotenv
+import os
+import requests
+
+load_dotenv()
+
+FEATHERLESS_API_KEY = os.getenv("FEATHERLESS_API_KEY")
 
 app = FastAPI()
 
@@ -73,7 +80,7 @@ async def analyze_image(file: UploadFile = File(...)):
         f.write(content)
 
     pollution_type = detect_issue_fake(file.filename)
-    analysis = analyze_issue_fake(pollution_type)
+    analysis = analyze_issue_with_featherless(pollution_type)
     audio_url = generate_voice_fake()
 
     return {
@@ -83,3 +90,49 @@ async def analyze_image(file: UploadFile = File(...)):
         "action": analysis["action"],
         "audio_url": audio_url
     }
+def analyze_issue_with_featherless(pollution_type):
+
+    if not FEATHERLESS_API_KEY:
+        return analyze_issue_fallback(pollution_type)
+
+    prompt = f"""
+You are an environmental risk analysis assistant.
+
+Detected issue: {pollution_type}
+
+Explain the environmental impact in 2 short sentences and suggest one action.
+"""
+
+    url = "https://api.featherless.ai/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {FEATHERLESS_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "messages": [
+            {"role": "system", "content": "You explain environmental risks clearly."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+
+        data = response.json()
+
+        content = data["choices"][0]["message"]["content"]
+
+        return {
+            "severity": "medium",
+            "summary": content,
+            "action": "Review and respond appropriately."
+        }
+
+    except Exception as e:
+        print("Featherless error:", e)
+        return analyze_issue_fallback(pollution_type)
