@@ -4,11 +4,15 @@ Handles authentication, user registration, and department management.
 """
 import os
 from typing import Optional, Dict, Any, List
-from supabase import create_client, Client
-from dotenv import load_dotenv
 import logging
 
-load_dotenv()
+# Try to import Supabase, but don't fail if not installed
+try:
+    from supabase import create_client
+    SUPABASE_AVAILABLE = True
+except ImportError:
+    create_client = None  # type: ignore
+    SUPABASE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +23,11 @@ class SupabaseService:
     def __init__(self):
         self.url = os.getenv("SUPABASE_URL")
         self.key = os.getenv("SUPABASE_ANON_KEY")
-        self.client: Optional[Client] = None
+        self.client: Optional[Any] = None  # Use Any to avoid type resolution issues
+        
+        if not SUPABASE_AVAILABLE:
+            logger.warning("Supabase package not installed. Install with: pip install supabase")
+            return
         
         if self.url and self.key:
             try:
@@ -449,6 +457,69 @@ class SupabaseService:
         except Exception as e:
             logger.error(f"Error getting department tickets: {e}")
             return []
+
+    # ==================== RISK LEARNING ====================
+
+    def store_risk_prediction(self, ticket_id: str, issue_type: str, prediction: Dict[str, Any]) -> bool:
+        """Persist a structured risk prediction event for future training."""
+        if not self.client:
+            return False
+
+        try:
+            payload = {
+                "ticket_id": ticket_id,
+                "predicted_issue_type": issue_type,
+                "predicted_category": prediction.get("predicted_category"),
+                "predicted_risk_level": prediction.get("predicted_risk_level"),
+                "predicted_responder_type": prediction.get("predicted_responder_type"),
+                "confidence": prediction.get("confidence", 0),
+                "requires_human_review": prediction.get("requires_human_review", False),
+                "model_version": prediction.get("model_version", "risk-engine-v1"),
+                "feature_snapshot": prediction.get("feature_snapshot", {}),
+                "prediction_sources": prediction.get("prediction_sources", []),
+                "learning_snapshot": prediction.get("learning_snapshot", {}),
+                "reason_codes": prediction.get("reason_codes", []),
+            }
+            response = self.client.table("incident_prediction_events").insert(payload).execute()
+            return response.data is not None
+        except Exception as e:
+            logger.error(f"Error storing risk prediction: {e}")
+            return False
+
+    def store_risk_feedback(
+        self,
+        ticket_id: str,
+        issue_type: str,
+        feedback: Dict[str, Any],
+        reviewer_department_id: Optional[str] = None,
+    ) -> bool:
+        """Persist verified training feedback for a ticket."""
+        if not self.client:
+            return False
+
+        try:
+            payload = {
+                "ticket_id": ticket_id,
+                "issue_type": issue_type,
+                "predicted_category": feedback.get("predicted_category"),
+                "predicted_risk_level": feedback.get("predicted_risk_level"),
+                "predicted_responder_type": feedback.get("predicted_responder_type"),
+                "final_category": feedback.get("final_category"),
+                "final_risk_level": feedback.get("final_risk_level"),
+                "final_responder_type": feedback.get("final_responder_type"),
+                "final_status": feedback.get("final_status", "resolved"),
+                "emergency_escalated": feedback.get("emergency_escalated", False),
+                "was_prediction_correct": feedback.get("was_prediction_correct"),
+                "reviewer_department_id": reviewer_department_id,
+                "responder_notes": feedback.get("responder_notes", ""),
+                "feature_snapshot": feedback.get("feature_snapshot", {}),
+                "model_version": feedback.get("model_version", "risk-engine-v1"),
+            }
+            response = self.client.table("incident_training_feedback").insert(payload).execute()
+            return response.data is not None
+        except Exception as e:
+            logger.error(f"Error storing risk feedback: {e}")
+            return False
 
 
 # Global service instance

@@ -2,7 +2,7 @@
 Pydantic schemas for authentication and user/department management.
 """
 from typing import Optional
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 
 
 class UserRegisterRequest(BaseModel):
@@ -30,6 +30,12 @@ class UserResponse(BaseModel):
 
 class UserAuthResponse(BaseModel):
     """Response schema for user authentication."""
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        validate_assignment=False,
+        str_strip_whitespace=True
+    )
+    
     user_id: str
     email: str
     session_token: str
@@ -68,6 +74,12 @@ class DepartmentResponse(BaseModel):
 
 class DepartmentAuthResponse(BaseModel):
     """Response schema for department authentication."""
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        validate_assignment=False,
+        str_strip_whitespace=True
+    )
+    
     department_id: str
     email: str
     session_token: str

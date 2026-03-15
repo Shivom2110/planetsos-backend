@@ -7,17 +7,21 @@ import requests
 import json
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
-
-# Import Supabase service and auth routes
-from routes_auth import router as auth_router
-from services.supabase_service import supabase_service
 
 # -----------------------
 # Load environment
 # -----------------------
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
+
+# Import Supabase service and auth routes after loading .env
+from routes_auth import router as auth_router
+from schemas.risk import RiskFeedbackRequest, RiskFeedbackResponse, RiskTrainingSummary
+from services.risk_engine import risk_engine
+from services.supabase_service import supabase_service
 
 FEATHERLESS_API_KEY = os.getenv("FEATHERLESS_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
@@ -44,20 +48,20 @@ app.include_router(auth_router)
 # Folders
 # -----------------------
 
-os.makedirs("uploads", exist_ok=True)
-os.makedirs("audio", exist_ok=True)
-os.makedirs("uploads_audio", exist_ok=True)
-os.makedirs("data", exist_ok=True)
+os.makedirs(BASE_DIR / "uploads", exist_ok=True)
+os.makedirs(BASE_DIR / "audio", exist_ok=True)
+os.makedirs(BASE_DIR / "uploads_audio", exist_ok=True)
+os.makedirs(BASE_DIR / "data", exist_ok=True)
 
-TICKETS_FILE = "data/tickets.json"
+TICKETS_FILE = BASE_DIR / "data" / "tickets.json"
 
 if not os.path.exists(TICKETS_FILE):
     with open(TICKETS_FILE, "w") as f:
         json.dump([], f)
 
-app.mount("/audio", StaticFiles(directory="audio"), name="audio")
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-app.mount("/uploads_audio", StaticFiles(directory="uploads_audio"), name="uploads_audio")
+app.mount("/audio", StaticFiles(directory=BASE_DIR / "audio"), name="audio")
+app.mount("/uploads", StaticFiles(directory=BASE_DIR / "uploads"), name="uploads")
+app.mount("/uploads_audio", StaticFiles(directory=BASE_DIR / "uploads_audio"), name="uploads_audio")
 
 # -----------------------
 # File + JSON helpers
@@ -76,18 +80,33 @@ def save_upload_file(upload_file: UploadFile, folder: str):
     if not ext:
         ext = ".bin"
     filename = f"{uuid.uuid4()}{ext}"
-    path = os.path.join(folder, filename)
+    path = BASE_DIR / folder / filename
 
     with open(path, "wb") as f:
         f.write(upload_file.file.read())
 
-    return path
+    return str(path)
 
 def public_path(folder, path):
     return f"/{folder}/{os.path.basename(path)}"
 
 def now_iso():
     return datetime.utcnow().isoformat() + "Z"
+
+
+def get_authenticated_account_id(authorization: Optional[str]) -> Optional[str]:
+    if not authorization or not supabase_service.is_available():
+        return None
+
+    try:
+        token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
+        user = supabase_service.client.auth.get_user(token)
+        if user.user:
+            return user.user.id
+    except Exception:
+        return None
+
+    return None
 
 # -----------------------
 # Fake issue detection for MVP
@@ -305,7 +324,7 @@ def generate_voice(text, prefix="earth"):
         response.raise_for_status()
 
         filename = f"{prefix}_{uuid.uuid4()}.mp3"
-        path = os.path.join("audio", filename)
+        path = BASE_DIR / "audio" / filename
 
         with open(path, "wb") as f:
             f.write(response.content)
@@ -404,26 +423,18 @@ async def create_ticket(
 ):
     if role != "reporter":
         raise HTTPException(status_code=400, detail="Only reporter can create a ticket")
-    
-    # Extract user_id from token if provided
-    user_id = None
-    if authorization and supabase_service.is_available():
-        try:
-            token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-            user = supabase_service.client.auth.get_user(token)
-            if user.user:
-                user_id = user.user.id
-        except Exception as e:
-            # If token is invalid, continue without user_id (anonymous report)
-            pass
+
+    user_id = get_authenticated_account_id(authorization)
 
     image_url = ""
     issue_type = "environmental hazard"
+    image_filename = ""
 
     if file is not None:
         image_path = save_upload_file(file, "uploads")
         image_url = public_path("uploads", image_path)
-        issue_type = detect_issue(file.filename or "")
+        image_filename = file.filename or ""
+        issue_type = detect_issue(image_filename)
 
     reporter_voice_url = ""
     if voice_note is not None:
@@ -444,14 +455,32 @@ async def create_ticket(
         reporter_transcript=reporter_transcript
     )
 
-    risk_level = ai_result["risk_level"]
-    assigned_responder_type = assign_responder(issue_type, risk_level)
+    risk_assessment = risk_engine.assess_incident(
+        issue_type=issue_type,
+        category=category,
+        latitude=latitude,
+        longitude=longitude,
+        address=address,
+        reporter_text=reporter_text,
+        reporter_transcript=reporter_transcript,
+        image_filename=image_filename,
+        llm_suggested_risk=ai_result.get("risk_level")
+    )
+
+    category = risk_assessment["predicted_category"]
+    risk_level = risk_assessment["predicted_risk_level"]
+    assigned_responder_type = risk_assessment["predicted_responder_type"]
+    baseline_profile = risk_assessment["baseline_profile"]
+    health_concern = ai_result.get("health_concern") or baseline_profile["health_concern"]
+    ecosystem_impact = ai_result.get("ecosystem_impact") or baseline_profile["ecosystem_impact"]
+    summary = ai_result.get("summary") or baseline_profile["summary"]
+    action = ai_result.get("action") or baseline_profile["action"]
 
     earth_voice_text = build_earth_voice_text(
         issue_type,
         risk_level,
-        ai_result["summary"],
-        ai_result["action"]
+        summary,
+        action
     )
     earth_audio_url = generate_voice(earth_voice_text, "earth")
 
@@ -464,11 +493,14 @@ async def create_ticket(
         "category": category,
         "issue_type": issue_type,
         "risk_level": risk_level,
-        "health_concern": ai_result["health_concern"],
-        "ecosystem_impact": ai_result["ecosystem_impact"],
-        "summary": ai_result["summary"],
-        "action": ai_result["action"],
+        "health_concern": health_concern,
+        "ecosystem_impact": ecosystem_impact,
+        "summary": summary,
+        "action": action,
         "assigned_responder_type": assigned_responder_type,
+        "prediction_confidence": risk_assessment["confidence"],
+        "requires_human_review": risk_assessment["requires_human_review"],
+        "risk_assessment": risk_assessment,
         "location": {
             "latitude": latitude,
             "longitude": longitude,
@@ -484,12 +516,17 @@ async def create_ticket(
         "responder_transcript": "",
         "responder_voice_url": "",
         "responder_tts_url": "",
-        "responder_type": ""
+        "responder_type": "",
+        "verified_outcome": None
     }
 
     tickets = load_tickets()
     tickets.append(ticket)
     save_tickets(tickets)
+
+    risk_engine.record_prediction(ticket["ticket_id"], issue_type, risk_assessment)
+    if supabase_service.is_available():
+        supabase_service.store_risk_prediction(ticket["ticket_id"], issue_type, risk_assessment)
 
     # Link ticket to user in Supabase if user is authenticated
     if user_id and supabase_service.is_available():
@@ -529,17 +566,7 @@ async def respond_to_ticket(
     generate_spoken_reply: str = Form(default="false"),
     authorization: Optional[str] = Header(None)
 ):
-    # Extract department_id from token if provided
-    department_id = None
-    if authorization and supabase_service.is_available():
-        try:
-            token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-            user = supabase_service.client.auth.get_user(token)
-            if user.user:
-                department_id = user.user.id
-        except Exception as e:
-            # If token is invalid, continue without department_id
-            pass
+    department_id = get_authenticated_account_id(authorization)
     tickets = load_tickets()
 
     target_ticket = None
@@ -586,3 +613,55 @@ async def respond_to_ticket(
         supabase_service.link_ticket_to_department(ticket_id, department_id)
 
     return target_ticket
+
+
+@app.post("/ticket/{ticket_id}/feedback", response_model=RiskFeedbackResponse)
+def record_ticket_feedback(
+    ticket_id: str,
+    request: RiskFeedbackRequest,
+    authorization: Optional[str] = Header(None)
+):
+    tickets = load_tickets()
+    target_ticket = None
+
+    for ticket in tickets:
+        if ticket["ticket_id"] == ticket_id:
+            target_ticket = ticket
+            break
+
+    if target_ticket is None:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+    reviewer_department_id = get_authenticated_account_id(authorization)
+    feedback_record = risk_engine.record_feedback(
+        target_ticket,
+        request.model_dump(),
+        reviewer_department_id=reviewer_department_id
+    )
+
+    target_ticket["verified_outcome"] = feedback_record
+    target_ticket["status"] = request.final_status
+    target_ticket["updated_at"] = now_iso()
+    if request.emergency_escalated:
+        target_ticket["status"] = "escalated"
+    save_tickets(tickets)
+
+    if supabase_service.is_available():
+        supabase_service.store_risk_feedback(
+            ticket_id=ticket_id,
+            issue_type=target_ticket.get("issue_type", "environmental hazard"),
+            feedback=feedback_record,
+            reviewer_department_id=reviewer_department_id
+        )
+
+    return {
+        "ticket_id": ticket_id,
+        "training_recorded": True,
+        "model_version": feedback_record["model_version"],
+        "feedback_summary": risk_engine.get_training_summary()
+    }
+
+
+@app.get("/risk/training-summary", response_model=RiskTrainingSummary)
+def get_risk_training_summary():
+    return risk_engine.get_training_summary()
