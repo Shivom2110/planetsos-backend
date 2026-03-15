@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -8,10 +8,6 @@ import json
 import uuid
 from datetime import datetime
 from typing import Optional
-
-# Import Supabase service and auth routes
-from routes_auth import router as auth_router
-from services.supabase_service import supabase_service
 
 # -----------------------
 # Load environment
@@ -36,9 +32,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Include authentication routes
-app.include_router(auth_router)
 
 # -----------------------
 # Folders
@@ -399,23 +392,10 @@ async def create_ticket(
     reporter_text: str = Form(default=""),
     reporter_transcript: str = Form(default=""),
     file: Optional[UploadFile] = File(default=None),
-    voice_note: Optional[UploadFile] = File(default=None),
-    authorization: Optional[str] = Header(None)
+    voice_note: Optional[UploadFile] = File(default=None)
 ):
     if role != "reporter":
         raise HTTPException(status_code=400, detail="Only reporter can create a ticket")
-    
-    # Extract user_id from token if provided
-    user_id = None
-    if authorization and supabase_service.is_available():
-        try:
-            token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-            user = supabase_service.client.auth.get_user(token)
-            if user.user:
-                user_id = user.user.id
-        except Exception as e:
-            # If token is invalid, continue without user_id (anonymous report)
-            pass
 
     image_url = ""
     issue_type = "environmental hazard"
@@ -491,10 +471,6 @@ async def create_ticket(
     tickets.append(ticket)
     save_tickets(tickets)
 
-    # Link ticket to user in Supabase if user is authenticated
-    if user_id and supabase_service.is_available():
-        supabase_service.link_ticket_to_user(ticket["ticket_id"], user_id)
-
     return ticket
 
 @app.get("/ticket/{ticket_id}")
@@ -526,20 +502,8 @@ async def respond_to_ticket(
     responder_text: str = Form(default=""),
     responder_transcript: str = Form(default=""),
     voice_note: Optional[UploadFile] = File(default=None),
-    generate_spoken_reply: str = Form(default="false"),
-    authorization: Optional[str] = Header(None)
+    generate_spoken_reply: str = Form(default="false")
 ):
-    # Extract department_id from token if provided
-    department_id = None
-    if authorization and supabase_service.is_available():
-        try:
-            token = authorization.replace("Bearer ", "") if authorization.startswith("Bearer ") else authorization
-            user = supabase_service.client.auth.get_user(token)
-            if user.user:
-                department_id = user.user.id
-        except Exception as e:
-            # If token is invalid, continue without department_id
-            pass
     tickets = load_tickets()
 
     target_ticket = None
@@ -580,9 +544,5 @@ async def respond_to_ticket(
     }
 
     save_tickets(tickets)
-
-    # Link ticket to department in Supabase if department is authenticated
-    if department_id and supabase_service.is_available():
-        supabase_service.link_ticket_to_department(ticket_id, department_id)
 
     return target_ticket
